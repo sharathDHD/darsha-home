@@ -11,6 +11,7 @@ Tested on a Xiaomi Mi TV running Android 9 (API 28). Min SDK 21, target SDK 34.
 - All apps grid (A-Z) with pin/unpin, rename, app info, and hide/unhide.
 - Hold OK (or press Menu) on Settings for Home settings: Warm / Black (OLED) / Blue themes, hidden apps, reset, and About.
 - HDMI inputs discovered from the TV's TvInputManager, with Live TV fallbacks.
+- HDMI tiles show the port number and update live: Active (green), Standby (amber), or No signal (gray).
 - Play Store shortcut.
 - No permissions, no INTERNET permission, no analytics.
 

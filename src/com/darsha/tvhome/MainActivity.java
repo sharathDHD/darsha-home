@@ -24,6 +24,8 @@ import android.media.tv.TvInputInfo;
 import android.media.tv.TvInputManager;
 import android.net.Uri;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.provider.Settings;
 import android.util.TypedValue;
 import android.view.Gravity;
@@ -52,6 +54,7 @@ import java.io.File;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
@@ -106,6 +109,33 @@ public class MainActivity extends Activity {
         @Override public void onReceive(Context c, Intent i) { dirty = true; }
     };
 
+    private TvInputManager tvInputManager;
+    private final Handler inputHandler = new Handler(Looper.getMainLooper());
+    private final Map<String, HdmiTile> hdmiTiles = new HashMap<>();
+    private boolean inputCallbackRegistered, resumed;
+
+    private final TvInputManager.TvInputCallback inputCallback = new TvInputManager.TvInputCallback() {
+        @Override public void onInputStateChanged(String inputId, int state) { updateHdmiTile(inputId, state); }
+        @Override public void onInputAdded(String inputId) { refreshInputLayout(); }
+        @Override public void onInputRemoved(String inputId) { refreshInputLayout(); }
+        @Override public void onInputUpdated(String inputId) { refreshInputLayout(); }
+    };
+
+    private static final class HdmiTile {
+        final FrameLayout card;
+        final ImageView icon;
+        final View dot;
+        final TextView status;
+        final String label;
+        HdmiTile(FrameLayout card, ImageView icon, View dot, TextView status, String label) {
+            this.card = card;
+            this.icon = icon;
+            this.dot = dot;
+            this.status = status;
+            this.label = label;
+        }
+    }
+
     @Override
     protected void onCreate(Bundle state) {
         super.onCreate(state);
@@ -159,8 +189,23 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        if (tvInputManager != null && inputCallbackRegistered) {
+            try { tvInputManager.unregisterCallback(inputCallback); } catch (Exception ignored) {}
+            inputCallbackRegistered = false;
+        }
+        inputHandler.removeCallbacksAndMessages(null);
         unregisterReceiver(packagesChanged);
         super.onDestroy();
+    }
+
+    @Override
+    protected void onPause() {
+        super.onPause();
+        resumed = false;
+        if (tvInputManager != null && inputCallbackRegistered) {
+            try { tvInputManager.unregisterCallback(inputCallback); } catch (Exception ignored) {}
+            inputCallbackRegistered = false;
+        }
     }
 
     @Override
@@ -214,10 +259,20 @@ public class MainActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
-        // Rebuild only when apps were installed, removed or updated.
+        resumed = true;
+        if (tvInputManager == null) tvInputManager = (TvInputManager) getSystemService(Context.TV_INPUT_SERVICE);
+        if (tvInputManager != null && !inputCallbackRegistered) {
+            try {
+                tvInputManager.registerCallback(inputCallback, inputHandler);
+                inputCallbackRegistered = true;
+            } catch (Exception ignored) {}
+        }
+        // Rebuild only when apps or inputs were installed, removed or updated.
         if (dirty) {
             dirty = false;
             buildTiles();
+        } else {
+            refreshHdmiStates();
         }
         View f = getCurrentFocus();
         if (f == null && !tiles.isEmpty()) tiles.get(0).requestFocus();
@@ -273,6 +328,7 @@ public class MainActivity extends Activity {
             ((ViewGroup) wrap.getParent()).removeView(wrap);
         }
         tiles.clear();
+        hdmiTiles.clear();
         rowApps.clear();
         movingKey = null;
         moveHint.setVisibility(View.GONE);
@@ -319,8 +375,13 @@ public class MainActivity extends Activity {
         int room = PER_ROW - 2 - (store ? 1 : 0);
         if (inputs.size() > room) inputs = inputs.subList(0, room);
         addTile(root, ALL, "All apps", null, LineIcon.APPS, null, m + col++ * (w + g), bottomTop, w, h);
-        for (TvInputInfo in : inputs)
-            addTile(root, in.getId(), inputLabel(in), null, LineIcon.HDMI, null, m + col++ * (w + g), bottomTop, w, h);
+        int inputIndex = 0;
+        for (TvInputInfo in : inputs) {
+            inputIndex++;
+            int port = portNumber(in);
+            addTile(root, in.getId(), inputLabel(in), null, LineIcon.HDMI, null,
+                    m + col++ * (w + g), bottomTop, w, h, port > 0 ? port : inputIndex);
+        }
         addTile(root, SETTINGS, "Settings", null, LineIcon.SETTINGS, null, m + col++ * (w + g), bottomTop, w, h);
         if (store)
             addTile(root, PLAY_STORE, "Play Store", null, LineIcon.PLAY, null, m + col * (w + g), bottomTop, w, h);
@@ -334,9 +395,16 @@ public class MainActivity extends Activity {
 
     private void addTile(ViewGroup parent, final String key, String label, Drawable banner, int[] lineIcon, Drawable appIcon,
                          int x, int y, int w, int h) {
+        addTile(parent, key, label, banner, lineIcon, appIcon, x, y, w, h, 0);
+    }
+
+    private void addTile(ViewGroup parent, final String key, String label, Drawable banner, int[] lineIcon, Drawable appIcon,
+                         int x, int y, int w, int h, int inputPort) {
         FrameLayout card = new FrameLayout(this);
         final GradientDrawable bg = new GradientDrawable();
         bg.setCornerRadius(px(RADIUS));
+        final boolean hdmi = isInput(key);
+        final int state = hdmi ? inputState(key) : -1;
         if (banner != null) {
             bg.setColor(0xFF1E1A1C);
             ImageView iv = new ImageView(this);
@@ -353,7 +421,32 @@ public class MainActivity extends Activity {
             int size = lineIcon != null ? px(44) : px(64);
             if (lineIcon != null) iv.setImageDrawable(new LineIcon(lineIcon));
             else if (appIcon != null) iv.setImageDrawable(fit(appIcon, size, size));
-            inner.addView(iv, new LinearLayout.LayoutParams(size, size));
+            View dot = null;
+            if (hdmi) {
+                iv.setAlpha(inputIconAlpha(state));
+                FrameLayout iconBox = new FrameLayout(this);
+                iconBox.addView(iv, new FrameLayout.LayoutParams(size, size));
+                TextView badge = text(px(20), Color.WHITE, semibold);
+                badge.setText(inputPort > 0 ? String.valueOf(inputPort) : "?");
+                badge.setGravity(Gravity.CENTER);
+                badge.setIncludeFontPadding(false);
+                GradientDrawable badgeBg = new GradientDrawable();
+                badgeBg.setShape(GradientDrawable.OVAL);
+                badgeBg.setColor(0xCC000000);
+                badgeBg.setStroke(Math.max(1, px(1)), 0x33FFFFFF);
+                badge.setBackground(badgeBg);
+                iconBox.addView(badge, new FrameLayout.LayoutParams(px(28), px(28), Gravity.TOP | Gravity.END));
+                dot = new View(this);
+                GradientDrawable dotBg = new GradientDrawable();
+                dotBg.setShape(GradientDrawable.OVAL);
+                dotBg.setColor(inputStateColor(state));
+                dotBg.setStroke(Math.max(1, px(2)), 0xCC000000);
+                dot.setBackground(dotBg);
+                iconBox.addView(dot, new FrameLayout.LayoutParams(px(14), px(14), Gravity.BOTTOM | Gravity.END));
+                inner.addView(iconBox, new LinearLayout.LayoutParams(size, size));
+            } else {
+                inner.addView(iv, new LinearLayout.LayoutParams(size, size));
+            }
             TextView t = text(px(24), 0xE0FFFFFF, regular);
             t.setText(label);
             t.setSingleLine(true);
@@ -363,6 +456,17 @@ public class MainActivity extends Activity {
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, -2);
             lp.topMargin = px(12);
             inner.addView(t, lp);
+            if (hdmi) {
+                TextView status = text(px(18), 0xCCFFFFFF, regular);
+                status.setText(inputStateLabel(state));
+                status.setSingleLine(true);
+                status.setGravity(Gravity.CENTER);
+                LinearLayout.LayoutParams sp = new LinearLayout.LayoutParams(-2, -2);
+                sp.topMargin = px(2);
+                inner.addView(status, sp);
+                hdmiTiles.put(key, new HdmiTile(card, iv, dot, status, label));
+                card.setContentDescription(label + ", " + inputStateLabel(state));
+            }
             card.addView(inner, new FrameLayout.LayoutParams(-1, -1));
         }
         card.setBackground(bg);
@@ -1217,15 +1321,95 @@ public class MainActivity extends Activity {
         return key.indexOf('/') > 0;
     }
 
+    private int inputState(String id) {
+        if (tvInputManager == null) tvInputManager = (TvInputManager) getSystemService(Context.TV_INPUT_SERVICE);
+        if (tvInputManager == null) return -1;
+        try { return tvInputManager.getInputState(id); } catch (Exception ignored) { return -1; }
+    }
+
+    private static String inputStateLabel(int state) {
+        if (state == TvInputManager.INPUT_STATE_CONNECTED) return "Active";
+        if (state == TvInputManager.INPUT_STATE_CONNECTED_STANDBY) return "Standby";
+        if (state == TvInputManager.INPUT_STATE_DISCONNECTED) return "No signal";
+        return "Unknown";
+    }
+
+    private static int inputStateColor(int state) {
+        if (state == TvInputManager.INPUT_STATE_CONNECTED) return 0xFF4CAF50;
+        if (state == TvInputManager.INPUT_STATE_CONNECTED_STANDBY) return 0xFFFFB300;
+        if (state == TvInputManager.INPUT_STATE_DISCONNECTED) return 0xFF9E9E9E;
+        return 0xFF757575;
+    }
+
+    private static float inputIconAlpha(int state) {
+        if (state == TvInputManager.INPUT_STATE_CONNECTED) return 1f;
+        if (state == TvInputManager.INPUT_STATE_CONNECTED_STANDBY) return 0.72f;
+        return 0.45f;
+    }
+
+    private void updateHdmiTile(String id, int state) {
+        HdmiTile t = hdmiTiles.get(id);
+        if (t == null) return;
+        t.icon.setAlpha(inputIconAlpha(state));
+        Drawable dot = t.dot.getBackground();
+        if (dot instanceof GradientDrawable) ((GradientDrawable) dot).setColor(inputStateColor(state));
+        t.status.setText(inputStateLabel(state));
+        t.card.setContentDescription(t.label + ", " + inputStateLabel(state));
+    }
+
+    private void refreshHdmiStates() {
+        for (String id : new ArrayList<>(hdmiTiles.keySet())) updateHdmiTile(id, inputState(id));
+    }
+
+    private void refreshInputLayout() {
+        dirty = true;
+        if (resumed) {
+            dirty = false;
+            buildTiles();
+        }
+    }
+
+    private int portNumber(TvInputInfo in) {
+        if (in == null) return 0;
+        int n = numberAfter(in.getId().toLowerCase(java.util.Locale.US), "hdmi");
+        if (n > 0) return n;
+        CharSequence label = in.loadLabel(this);
+        n = label == null ? 0 : firstNumber(label.toString());
+        return n > 0 ? n : 0;
+    }
+
+    private static int numberAfter(String s, String token) {
+        int i = s.indexOf(token);
+        return i < 0 ? 0 : firstNumber(s.substring(i + token.length()));
+    }
+
+    private static int firstNumber(String s) {
+        int n = -1;
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c >= '0' && c <= '9') {
+                if (n < 0) n = 0;
+                n = n * 10 + (c - '0');
+            } else if (n >= 0) {
+                break;
+            }
+        }
+        return n > 0 ? n : 0;
+    }
+
     // The TV's own HDMI inputs (not devices behind them), in order, skipping hidden ones.
     private List<TvInputInfo> hdmiInputs() {
         List<TvInputInfo> out = new ArrayList<>();
-        TvInputManager tim = (TvInputManager) getSystemService(Context.TV_INPUT_SERVICE);
-        if (tim == null) return out;
-        for (TvInputInfo in : tim.getTvInputList()) {
+        if (tvInputManager == null) tvInputManager = (TvInputManager) getSystemService(Context.TV_INPUT_SERVICE);
+        if (tvInputManager == null) return out;
+        for (TvInputInfo in : tvInputManager.getTvInputList()) {
             if (in.getType() == TvInputInfo.TYPE_HDMI && in.getParentId() == null && !in.isHidden(this)) out.add(in);
         }
-        Collections.sort(out, (a, b) -> a.getId().compareTo(b.getId()));
+        Collections.sort(out, (a, b) -> {
+            int pa = portNumber(a), pb = portNumber(b);
+            if (pa > 0 && pb > 0 && pa != pb) return pa - pb;
+            return a.getId().compareTo(b.getId());
+        });
         return out.size() > MAX_INPUTS ? out.subList(0, MAX_INPUTS) : out;
     }
 
