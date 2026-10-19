@@ -2,6 +2,8 @@
 
 A small, personal Android TV home screen: a clean app launcher with no permissions and no internet access. Built directly from source with the Android SDK tools (no Gradle) and signed locally.
 
+The repo also includes an optional clock screensaver for TVs whose firmware force-suspends on idle.
+
 Tested on a Xiaomi Mi TV running Android 9 (API 28). Min SDK 21, target SDK 34.
 
 ## Features
@@ -13,7 +15,8 @@ Tested on a Xiaomi Mi TV running Android 9 (API 28). Min SDK 21, target SDK 34.
 - HDMI inputs discovered from the TV's TvInputManager, with Live TV fallbacks.
 - HDMI tiles show the port number and update live: Active (green), Standby (amber), or No signal (gray).
 - Play Store shortcut.
-- No permissions, no INTERNET permission, no analytics.
+- Optional companion clock screensaver for TVs that sleep before a normal screensaver can start.
+- The home screen itself has no permissions, no INTERNET permission, and no analytics.
 
 ## Build
 
@@ -72,6 +75,41 @@ adb shell pm disable-user --user 0 <stock-launcher-package>
 
 Re-enable it with `adb shell pm enable <stock-launcher-package>`.
 
+## Clock screensaver (optional)
+
+`screensaver/` is a separate app (`com.sharath.tvscreensaver`) for TVs that force-suspend on idle, such as some Xiaomi models. An accessibility service shows a clock shortly before the screen timeout; any remote key dismisses it and returns to the previous app. It skips the clock while audio is playing. The app has no launcher activity, so it does not appear in the app grid.
+
+Build it with the same key as the home screen (run the main build once so `key.jks` exists):
+
+```powershell
+.\screensaver\build.ps1
+```
+
+```sh
+sh screensaver/build.sh
+```
+
+Install and enable the watcher:
+
+```sh
+adb install -r screensaver/out/tv-screensaver.apk
+adb shell settings put secure enabled_accessibility_services com.sharath.tvscreensaver/com.sharath.tvscreensaver.IdleWatcherService
+adb shell settings put secure accessibility_enabled 1
+adb shell appops set com.sharath.tvscreensaver SYSTEM_ALERT_WINDOW allow
+adb shell settings put system screen_off_timeout 300000
+adb shell settings put secure tvscreensaver_force 0
+```
+
+The clock appears at `screen_off_timeout` minus 8 seconds. Set `tvscreensaver_force` to `1` to test it immediately even while audio is playing. The accessibility service only watches key events to reset its idle timer; it does not read screen content.
+
+To turn the watcher off:
+
+```sh
+adb shell settings put secure enabled_accessibility_services ""
+```
+
+If the original debug-signed build from the TV setup session is still installed, uninstall it first (`adb uninstall com.sharath.tvscreensaver`); this build uses the repo's `tvhome` key.
+
 ## Configuration
 
 The default home row comes from `apps.txt` (one package name per line). Missing apps are skipped. You can also pass a list when starting the app:
@@ -91,6 +129,7 @@ After you edit the row on the TV, the saved list takes over. `Home settings -> R
 - `install-local.ps1` / `install.sh` - install and set as the default home screen.
 - `undo.sh` - restore the previous home screen (Unix).
 - `apps.txt` - default app list.
+- `screensaver/` - optional clock screensaver app with its own build scripts.
 
 ## Notes
 
